@@ -48,9 +48,23 @@ def save_to_drive(img_bytes, filename):
     pdf_buffer = BytesIO()
     img.save(pdf_buffer, format="PDF")
     pdf_buffer.seek(0)
-    file_metadata = {"name": filename, "parents": [DRIVE_FOLDER_ID]}
+    file_metadata = {
+        "name": filename,
+        "parents": [DRIVE_FOLDER_ID]
+    }
     media = MediaIoBaseUpload(pdf_buffer, mimetype="application/pdf")
-    file = drive_service.files().create(body=file_metadata, media_body=media, fields="id, webViewLink").execute()
+    file = drive_service.files().create(
+        body=file_metadata,
+        media_body=media,
+        fields="id, webViewLink",
+        supportsAllDrives=True
+    ).execute()
+    # Make file readable by anyone with the link
+    drive_service.permissions().create(
+        fileId=file.get("id"),
+        body={"type": "anyone", "role": "reader"},
+        supportsAllDrives=True
+    ).execute()
     return file.get("webViewLink")
 
 
