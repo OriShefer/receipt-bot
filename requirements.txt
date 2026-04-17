@@ -1,0 +1,9 @@
+flask
+anthropic
+python-telegram-bot==20.7
+google-auth
+google-api-python-client
+google-auth-httplib2
+python-dotenv
+Pillow
+requests
