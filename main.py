@@ -9,6 +9,8 @@ import anthropic
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 
 load_dotenv()
 
@@ -21,12 +23,23 @@ SPREADSHEET_ID = os.getenv("GOOGLE_SPREADSHEET_ID")
 AGENT_ID = os.getenv("AGENT_ID")
 ENVIRONMENT_ID = os.getenv("ENVIRONMENT_ID")
 
-# Load Google credentials from environment (paste your JSON key as one line)
+# Google Sheets — service account
 SERVICE_ACCOUNT_INFO = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"))
-SCOPES = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/spreadsheets"]
-creds = service_account.Credentials.from_service_account_info(SERVICE_ACCOUNT_INFO, scopes=SCOPES)
-drive_service = build("drive", "v3", credentials=creds)
-sheets_service = build("sheets", "v4", credentials=creds)
+SCOPES_SHEETS = ["https://www.googleapis.com/auth/spreadsheets"]
+sa_creds = service_account.Credentials.from_service_account_info(SERVICE_ACCOUNT_INFO, scopes=SCOPES_SHEETS)
+sheets_service = build("sheets", "v4", credentials=sa_creds)
+
+# Google Drive — personal OAuth
+drive_creds = Credentials(
+    token=os.getenv("GOOGLE_DRIVE_ACCESS_TOKEN"),
+    refresh_token=os.getenv("GOOGLE_DRIVE_REFRESH_TOKEN"),
+    client_id=os.getenv("GOOGLE_CLIENT_ID"),
+    client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
+    token_uri="https://oauth2.googleapis.com/token"
+)
+if drive_creds.expired:
+    drive_creds.refresh(Request())
+drive_service = build("drive", "v3", credentials=drive_creds)
 
 anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
@@ -48,30 +61,19 @@ def save_to_drive(img_bytes, filename):
     pdf_buffer = BytesIO()
     img.save(pdf_buffer, format="PDF")
     pdf_buffer.seek(0)
-    file_metadata = {
-        "name": filename,
-        "parents": [DRIVE_FOLDER_ID]
-    }
+    file_metadata = {"name": filename, "parents": [DRIVE_FOLDER_ID]}
     media = MediaIoBaseUpload(pdf_buffer, mimetype="application/pdf")
     file = drive_service.files().create(
         body=file_metadata,
         media_body=media,
-        fields="id, webViewLink",
-        supportsAllDrives=True
-    ).execute()
-    # Make file readable by anyone with the link
-    drive_service.permissions().create(
-        fileId=file.get("id"),
-        body={"type": "anyone", "role": "reader"},
-        supportsAllDrives=True
+        fields="id, webViewLink"
     ).execute()
     return file.get("webViewLink")
 
 
 def append_to_sheet(data, drive_link):
     now = datetime.now()
-    month_name = now.strftime("%B %Y")  # e.g. "April 2025"
-    # Try to find existing sheet tab, else create it
+    month_name = now.strftime("%B %Y")
     spreadsheet = sheets_service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
     sheet_names = [s["properties"]["title"] for s in spreadsheet["sheets"]]
     if month_name not in sheet_names:
@@ -79,7 +81,6 @@ def append_to_sheet(data, drive_link):
             spreadsheetId=SPREADSHEET_ID,
             body={"requests": [{"addSheet": {"properties": {"title": month_name}}}]}
         ).execute()
-        # Add headers
         sheets_service.spreadsheets().values().update(
             spreadsheetId=SPREADSHEET_ID, range=f"{month_name}!A1",
             valueInputOption="RAW",
@@ -102,9 +103,8 @@ def append_to_sheet(data, drive_link):
     ).execute()
 
 
-def process_receipt_with_agent(img_bytes, chat_id):
+def process_receipt_with_agent(img_bytes):
     img_b64 = base64.standard_b64encode(img_bytes).decode("utf-8")
-    # Create a session
     session = anthropic_client.beta.sessions.create(
         agent=AGENT_ID,
         environment_id=ENVIRONMENT_ID,
@@ -112,7 +112,6 @@ def process_receipt_with_agent(img_bytes, chat_id):
         betas=["managed-agents-2026-04-01"]
     )
     session_id = session.id
-    # Send the image + instruction
     anthropic_client.beta.sessions.events.send(
         session_id=session_id,
         events=[{
@@ -127,7 +126,6 @@ def process_receipt_with_agent(img_bytes, chat_id):
         }],
         betas=["managed-agents-2026-04-01"]
     )
-    # Poll for response
     last_id = None
     agent_text = ""
     for _ in range(60):
@@ -162,20 +160,15 @@ def webhook():
         file_id = photos[-1]["file_id"]
         img_bytes = download_telegram_photo(file_id)
         filename = f"קבלה_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-        # Save to Drive
         drive_link = save_to_drive(img_bytes, filename)
-        # Process with agent
-        agent_response = process_receipt_with_agent(img_bytes, chat_id)
-        # Parse JSON from agent
+        agent_response = process_receipt_with_agent(img_bytes)
         try:
             data = json.loads(agent_response)
         except:
             import re
             match = re.search(r'\{.*\}', agent_response, re.DOTALL)
             data = json.loads(match.group()) if match else {}
-        # Save to Sheets
         append_to_sheet(data, drive_link)
-        # Build confirmation message
         confirmation = (
             f"✅ הקבלה נשמרה בהצלחה!\n\n"
             f"📅 תאריך: {data.get('date', 'לא זוהה')}\n"
@@ -195,6 +188,4 @@ def webhook():
 
 
 if __name__ == "__main__":
-    # Set webhook (run once)
-    # requests.get(f"{TELEGRAM_API}/setWebhook?url=https://YOUR-APP-URL/webhook/{TELEGRAM_TOKEN}")
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))

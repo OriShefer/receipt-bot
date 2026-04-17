@@ -1,3 +1,4 @@
 .env
 __pycache__/
 *.pyc
+get_token.py
