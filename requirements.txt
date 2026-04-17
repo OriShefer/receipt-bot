@@ -1,4 +1,5 @@
 flask
+gunicorn
 anthropic
 python-telegram-bot==20.7
 google-auth
